@@ -1,0 +1,67 @@
+[workspace]
+members = [
+    "crates/toon-core",
+        "crates/memory-engine",
+            "crates/llm-router",
+                "crates/prompt-engine",
+                    "crates/refine-loop",
+                        "crates/agent-runtime",
+                            "crates/api-server",
+                            ]
+                            resolver = "2"
+
+                            [workspace.package]
+                            version     = "0.1.0"
+                            edition     = "2021"
+                            authors     = ["MgeTa3DOM"]
+                            license     = "MIT"
+                            repository  = "https://github.com/MgeTa3DOM/Apophy"
+
+                            # ── Shared dependencies (version pinned) ─────────────────────────────────────
+                            [workspace.dependencies]
+                            # Async runtime
+                            tokio        = { version = "1.40",  features = ["full"] }
+                            tokio-stream = "0.1"
+
+                            # Web / API
+                            axum         = { version = "0.8",   features = ["ws"] }
+                            tower        = "0.5"
+                            tower-http   = { version = "0.6",   features = ["cors", "trace"] }
+
+                            # Serialization
+                            serde        = { version = "1",     features = ["derive"] }
+                            serde_json   = "1"
+                            zstd         = "0.13"
+
+                            # Database
+                            rusqlite     = { version = "0.32",  features = ["bundled"] }
+
+                            # LLM inference (sovereign local — zero cloud)
+                            llama_cpp    = { version = "0.3",   features = ["cuda"] }
+
+                            # Token counting
+                            tiktoken-rs  = "0.7"
+
+                            # Utilities
+                            uuid         = { version = "1",     features = ["v4"] }
+                            chrono       = { version = "0.4",   features = ["serde"] }
+                            sha2         = "0.10"
+                            dirs-next    = "2"
+                            thiserror    = "2"
+                            anyhow       = "1"
+
+                            # Logging / tracing
+                            tracing            = "0.1"
+                            tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+                            # Internal crates
+                            toon-core      = { path = "crates/toon-core" }
+                            memory-engine  = { path = "crates/memory-engine" }
+                            llm-router     = { path = "crates/llm-router" }
+                            prompt-engine  = { path = "crates/prompt-engine" }
+                            refine-loop    = { path = "crates/refine-loop" }
+
+                            # ── Dev / test dependencies ───────────────────────────────────────────────────
+                            [workspace.dev-dependencies]
+                            tokio = { version = "1.40", features = ["full", "test-util"] }
+                            tempfile = "3"
