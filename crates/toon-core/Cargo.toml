@@ -1,0 +1,16 @@
+[package]
+name        = "toon-core"
+description = "Token-Oriented Object Notation v3 — compact serialization for LLMs (-60% tokens vs JSON)"
+version.workspace    = true
+edition.workspace    = true
+license.workspace    = true
+
+[dependencies]
+serde_json  = { workspace = true }
+zstd        = { workspace = true }
+serde       = { workspace = true }
+thiserror   = { workspace = true }
+tiktoken-rs = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
