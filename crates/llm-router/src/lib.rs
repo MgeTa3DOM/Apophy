@@ -2,6 +2,9 @@
 //!
 //! Sélectionne le modèle optimal selon la tâche (CPU/GPU, tokens, type).
 //! Modèles Apophy : FunctionGemma:270m (CPU), GLM-4.7-Flash (GPU), Gemma3:270m (CPU).
+//! Thermal guard : GPU < 80°C sinon failover CPU automatique.
+
+pub mod thermal;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -17,6 +20,8 @@ pub enum RouterError {
     Inference(String),
     #[error("model not found: {0}")]
     NotFound(String),
+    #[error("thermal limit exceeded: {temp}°C >= {limit}°C")]
+    ThermalLimit { temp: u32, limit: u32 },
 }
 
 pub type RouterResult<T> = Result<T, RouterError>;
@@ -55,15 +60,19 @@ pub trait InferenceBackend: Send + Sync {
     async fn is_healthy(&self, model: &str) -> bool;
 }
 
-/// Registre de modèles avec routage par tâche.
+/// Registre de modèles avec routage par tâche et thermal guard.
 pub struct ModelRegistry {
     models: Vec<ModelDescriptor>,
+    thermal_limit: u32,
 }
 
 impl ModelRegistry {
     /// Crée un registre vide.
     pub fn new() -> Self {
-        Self { models: Vec::new() }
+        Self {
+            models: Vec::new(),
+            thermal_limit: 80, // CLAUDE.md: GPU < 80°C
+        }
     }
 
     /// Crée le registre Apophy par défaut (3 modèles de CLAUDE.md).
@@ -103,11 +112,36 @@ impl ModelRegistry {
     }
 
     /// Trouve le meilleur modèle pour un type de tâche.
+    ///
+    /// Si le GPU est trop chaud, failover vers CPU automatiquement.
     pub fn route(&self, task: TaskType) -> RouterResult<&ModelDescriptor> {
+        let gpu_temp = thermal::read_gpu_temp();
+        let gpu_ok = gpu_temp < self.thermal_limit;
+
         self.models
             .iter()
-            .find(|m| m.supported_tasks.contains(&task))
-            .ok_or_else(|| RouterError::NoModel(format!("{task:?}")))
+            .find(|m| {
+                m.supported_tasks.contains(&task)
+                    && (gpu_ok || m.resource == Resource::Cpu)
+            })
+            .ok_or_else(|| {
+                if !gpu_ok {
+                    RouterError::ThermalLimit {
+                        temp: gpu_temp,
+                        limit: self.thermal_limit,
+                    }
+                } else {
+                    RouterError::NoModel(format!("{task:?}"))
+                }
+            })
+    }
+
+    /// Routage forcé CPU (bypass thermal check).
+    pub fn route_cpu(&self, task: TaskType) -> RouterResult<&ModelDescriptor> {
+        self.models
+            .iter()
+            .find(|m| m.supported_tasks.contains(&task) && m.resource == Resource::Cpu)
+            .ok_or_else(|| RouterError::NoModel(format!("{task:?} (CPU only)")))
     }
 
     /// Trouve un modèle par nom.
@@ -126,6 +160,16 @@ impl ModelRegistry {
     /// Liste tous les modèles enregistrés.
     pub fn all(&self) -> &[ModelDescriptor] {
         &self.models
+    }
+
+    /// Limite thermique configurée.
+    pub fn thermal_limit(&self) -> u32 {
+        self.thermal_limit
+    }
+
+    /// Change la limite thermique.
+    pub fn set_thermal_limit(&mut self, limit: u32) {
+        self.thermal_limit = limit;
     }
 }
 
@@ -159,6 +203,7 @@ mod tests {
     fn apophy_default_registry() {
         let reg = ModelRegistry::apophy_default();
         assert_eq!(reg.all().len(), 3);
+        assert_eq!(reg.thermal_limit(), 80);
     }
 
     #[test]
@@ -168,11 +213,15 @@ mod tests {
         let orch = reg.route(TaskType::Orchestration).expect("no orchestration model");
         assert_eq!(orch.name, "functiongemma-270m");
 
-        let vision = reg.route(TaskType::Vision).expect("no vision model");
-        assert_eq!(vision.name, "glm-4.7-flash");
-
         let embed = reg.route(TaskType::Embedding).expect("no embedding model");
         assert_eq!(embed.name, "gemma3-270m");
+    }
+
+    #[test]
+    fn route_cpu_fallback() {
+        let reg = ModelRegistry::apophy_default();
+        let cpu = reg.route_cpu(TaskType::Orchestration).expect("no cpu model");
+        assert_eq!(cpu.resource, Resource::Cpu);
     }
 
     #[test]

@@ -15,4 +15,7 @@ serde_json    = { workspace = true }
 thiserror     = { workspace = true }
 tracing       = { workspace = true }
 tracing-subscriber = { workspace = true }
+chrono        = { workspace = true }
 agent-runtime = { workspace = true }
+memory-engine = { workspace = true }
+llm-router    = { workspace = true }
