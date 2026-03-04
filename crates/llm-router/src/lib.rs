@@ -1,17 +1,15 @@
-//! LLM Router — routage souverain entre modèles GGUF locaux.
+//! LLM Router — intelligent model selection for local inference.
 //!
-//! Sélectionne le modèle optimal selon la tâche (CPU/GPU, tokens, type).
-//! Modèles Apophy : FunctionGemma:270m (CPU), GLM-4.7-Flash (GPU), Gemma3:270m (CPU).
-//! Thermal guard : GPU < 80°C sinon failover CPU automatique.
-
-pub mod thermal;
+//! Routes inference requests to the optimal model based on task type,
+//! model capabilities, and resource availability. Backend-agnostic:
+//! works with any GGUF-compatible runtime (llama.cpp, vLLM, etc.).
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::info;
 
-/// Erreurs routeur.
+/// Router errors.
 #[derive(Debug, Error)]
 pub enum RouterError {
     #[error("no model available for task: {0}")]
@@ -20,29 +18,30 @@ pub enum RouterError {
     Inference(String),
     #[error("model not found: {0}")]
     NotFound(String),
-    #[error("thermal limit exceeded: {temp}°C >= {limit}°C")]
-    ThermalLimit { temp: u32, limit: u32 },
+    #[error("backend unavailable: {0}")]
+    BackendUnavailable(String),
 }
 
 pub type RouterResult<T> = Result<T, RouterError>;
 
-/// Ressource cible pour un modèle.
+/// Compute resource type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Resource {
     Cpu,
     Gpu,
 }
 
-/// Type de tâche pour le routage.
+/// Task type for routing decisions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TaskType {
     Orchestration,
     Vision,
     CodeGen,
     Embedding,
+    Chat,
 }
 
-/// Descripteur de modèle local.
+/// Model descriptor — backend-agnostic.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelDescriptor {
     pub name: String,
@@ -50,101 +49,99 @@ pub struct ModelDescriptor {
     pub resource: Resource,
     pub max_tokens: usize,
     pub supported_tasks: Vec<TaskType>,
-    pub gpu_memory_mb: Option<u32>,
+    /// Estimated memory footprint in MB (for capacity planning).
+    pub memory_mb: Option<u32>,
 }
 
-/// Trait pour backend d'inférence (llama.cpp, etc.).
+/// Trait for pluggable inference backends.
+///
+/// Implement this for llama.cpp, vLLM, Ollama, or any local runtime.
 #[async_trait]
 pub trait InferenceBackend: Send + Sync {
+    /// Generate a completion from the model.
     async fn generate(&self, model: &str, prompt: &str, max_tokens: usize) -> RouterResult<String>;
+    /// Check if the backend is healthy and ready.
     async fn is_healthy(&self, model: &str) -> bool;
 }
 
-/// Registre de modèles avec routage par tâche et thermal guard.
+/// Model registry with task-based routing.
 pub struct ModelRegistry {
     models: Vec<ModelDescriptor>,
-    thermal_limit: u32,
 }
 
 impl ModelRegistry {
-    /// Crée un registre vide.
+    /// Creates an empty registry.
     pub fn new() -> Self {
         Self {
             models: Vec::new(),
-            thermal_limit: 80, // CLAUDE.md: GPU < 80°C
         }
     }
 
-    /// Crée le registre Apophy par défaut (3 modèles de CLAUDE.md).
-    pub fn apophy_default() -> Self {
+    /// Creates a default registry with common small models.
+    ///
+    /// Override with your own models via `register()`.
+    pub fn with_defaults() -> Self {
         let mut reg = Self::new();
         reg.register(ModelDescriptor {
-            name: "functiongemma-270m".to_string(),
+            name: "router-small".to_string(),
             role: "orchestration".to_string(),
             resource: Resource::Cpu,
             max_tokens: 2048,
             supported_tasks: vec![TaskType::Orchestration],
-            gpu_memory_mb: None,
+            memory_mb: Some(512),
         });
         reg.register(ModelDescriptor {
-            name: "glm-4.7-flash".to_string(),
-            role: "vision-code".to_string(),
-            resource: Resource::Gpu,
+            name: "coder-medium".to_string(),
+            role: "code-generation".to_string(),
+            resource: Resource::Cpu,
             max_tokens: 8192,
-            supported_tasks: vec![TaskType::Vision, TaskType::CodeGen],
-            gpu_memory_mb: Some(4096),
+            supported_tasks: vec![TaskType::CodeGen, TaskType::Chat],
+            memory_mb: Some(4096),
         });
         reg.register(ModelDescriptor {
-            name: "gemma3-270m".to_string(),
+            name: "embedder-small".to_string(),
             role: "embedding".to_string(),
             resource: Resource::Cpu,
             max_tokens: 2048,
             supported_tasks: vec![TaskType::Embedding],
-            gpu_memory_mb: None,
+            memory_mb: Some(256),
         });
         reg
     }
 
-    /// Enregistre un modèle.
+    /// Registers a model in the registry.
     pub fn register(&mut self, model: ModelDescriptor) {
-        info!(model = %model.name, "registered");
+        info!(model = %model.name, role = %model.role, "model registered");
         self.models.push(model);
     }
 
-    /// Trouve le meilleur modèle pour un type de tâche.
-    ///
-    /// Si le GPU est trop chaud, failover vers CPU automatiquement.
+    /// Routes a task to the best available model.
     pub fn route(&self, task: TaskType) -> RouterResult<&ModelDescriptor> {
-        let gpu_temp = thermal::read_gpu_temp();
-        let gpu_ok = gpu_temp < self.thermal_limit;
-
         self.models
             .iter()
-            .find(|m| {
-                m.supported_tasks.contains(&task)
-                    && (gpu_ok || m.resource == Resource::Cpu)
-            })
-            .ok_or_else(|| {
-                if !gpu_ok {
-                    RouterError::ThermalLimit {
-                        temp: gpu_temp,
-                        limit: self.thermal_limit,
-                    }
-                } else {
-                    RouterError::NoModel(format!("{task:?}"))
-                }
-            })
+            .find(|m| m.supported_tasks.contains(&task))
+            .ok_or_else(|| RouterError::NoModel(format!("{task:?}")))
     }
 
-    /// Routage forcé CPU (bypass thermal check).
-    pub fn route_cpu(&self, task: TaskType) -> RouterResult<&ModelDescriptor> {
-        self.models
+    /// Routes with a resource preference (CPU or GPU).
+    pub fn route_with_resource(
+        &self,
+        task: TaskType,
+        resource: Resource,
+    ) -> RouterResult<&ModelDescriptor> {
+        // Try preferred resource first
+        if let Some(model) = self
+            .models
             .iter()
-            .find(|m| m.supported_tasks.contains(&task) && m.resource == Resource::Cpu)
-            .ok_or_else(|| RouterError::NoModel(format!("{task:?} (CPU only)")))
+            .find(|m| m.supported_tasks.contains(&task) && m.resource == resource)
+        {
+            return Ok(model);
+        }
+        // Fallback to any resource
+        self.route(task)
     }
 
-    /// Trouve un modèle par nom.
+    /// Finds a model by name.
     pub fn get(&self, name: &str) -> RouterResult<&ModelDescriptor> {
         self.models
             .iter()
@@ -152,24 +149,25 @@ impl ModelRegistry {
             .ok_or_else(|| RouterError::NotFound(name.to_string()))
     }
 
-    /// Liste tous les modèles CPU (fallback si GPU indisponible).
-    pub fn cpu_models(&self) -> Vec<&ModelDescriptor> {
-        self.models.iter().filter(|m| m.resource == Resource::Cpu).collect()
+    /// Lists models filtered by resource type.
+    pub fn by_resource(&self, resource: Resource) -> Vec<&ModelDescriptor> {
+        self.models
+            .iter()
+            .filter(|m| m.resource == resource)
+            .collect()
     }
 
-    /// Liste tous les modèles enregistrés.
+    /// Returns all registered models.
     pub fn all(&self) -> &[ModelDescriptor] {
         &self.models
     }
 
-    /// Limite thermique configurée.
-    pub fn thermal_limit(&self) -> u32 {
-        self.thermal_limit
-    }
-
-    /// Change la limite thermique.
-    pub fn set_thermal_limit(&mut self, limit: u32) {
-        self.thermal_limit = limit;
+    /// Total estimated memory footprint in MB.
+    pub fn total_memory_mb(&self) -> u32 {
+        self.models
+            .iter()
+            .filter_map(|m| m.memory_mb)
+            .sum()
     }
 }
 
@@ -186,59 +184,69 @@ mod tests {
     #[test]
     fn model_descriptor_serializes() {
         let desc = ModelDescriptor {
-            name: "gemma3-270m".to_string(),
+            name: "test-model".to_string(),
             role: "embedding".to_string(),
             resource: Resource::Cpu,
             max_tokens: 2048,
             supported_tasks: vec![TaskType::Embedding],
-            gpu_memory_mb: None,
+            memory_mb: Some(256),
         };
         let json = serde_json::to_string(&desc).expect("serialize failed");
         let back: ModelDescriptor = serde_json::from_str(&json).expect("deserialize failed");
-        assert_eq!(back.name, "gemma3-270m");
+        assert_eq!(back.name, "test-model");
         assert_eq!(back.resource, Resource::Cpu);
     }
 
     #[test]
-    fn apophy_default_registry() {
-        let reg = ModelRegistry::apophy_default();
+    fn default_registry() {
+        let reg = ModelRegistry::with_defaults();
         assert_eq!(reg.all().len(), 3);
-        assert_eq!(reg.thermal_limit(), 80);
     }
 
     #[test]
     fn route_by_task() {
-        let reg = ModelRegistry::apophy_default();
+        let reg = ModelRegistry::with_defaults();
 
         let orch = reg.route(TaskType::Orchestration).expect("no orchestration model");
-        assert_eq!(orch.name, "functiongemma-270m");
+        assert_eq!(orch.name, "router-small");
 
         let embed = reg.route(TaskType::Embedding).expect("no embedding model");
-        assert_eq!(embed.name, "gemma3-270m");
+        assert_eq!(embed.name, "embedder-small");
+
+        let code = reg.route(TaskType::CodeGen).expect("no codegen model");
+        assert_eq!(code.name, "coder-medium");
     }
 
     #[test]
-    fn route_cpu_fallback() {
-        let reg = ModelRegistry::apophy_default();
-        let cpu = reg.route_cpu(TaskType::Orchestration).expect("no cpu model");
-        assert_eq!(cpu.resource, Resource::Cpu);
+    fn route_with_resource_preference() {
+        let reg = ModelRegistry::with_defaults();
+        let model = reg
+            .route_with_resource(TaskType::Orchestration, Resource::Cpu)
+            .expect("no model");
+        assert_eq!(model.resource, Resource::Cpu);
     }
 
     #[test]
-    fn cpu_fallback() {
-        let reg = ModelRegistry::apophy_default();
-        let cpu = reg.cpu_models();
-        assert_eq!(cpu.len(), 2);
+    fn by_resource_filter() {
+        let reg = ModelRegistry::with_defaults();
+        let cpu = reg.by_resource(Resource::Cpu);
+        assert_eq!(cpu.len(), 3);
         assert!(cpu.iter().all(|m| m.resource == Resource::Cpu));
     }
 
     #[test]
     fn get_by_name() {
-        let reg = ModelRegistry::apophy_default();
-        let model = reg.get("glm-4.7-flash").expect("not found");
-        assert_eq!(model.resource, Resource::Gpu);
-        assert_eq!(model.gpu_memory_mb, Some(4096));
+        let reg = ModelRegistry::with_defaults();
+        let model = reg.get("coder-medium").expect("not found");
+        assert_eq!(model.max_tokens, 8192);
 
         assert!(reg.get("nonexistent").is_err());
+    }
+
+    #[test]
+    fn total_memory_estimate() {
+        let reg = ModelRegistry::with_defaults();
+        let total = reg.total_memory_mb();
+        assert!(total > 0);
     }
 }

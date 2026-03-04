@@ -1,6 +1,6 @@
-//! API Server — Axum HTTP + WebSocket pour Apophy.
+//! API Server — Axum HTTP for Apophy.
 //!
-//! Expose le workflow hybride, la mémoire et le routeur via REST.
+//! RESTful API for workflow execution, memory management, and model routing.
 
 use axum::{
     extract::{Path, Query, State},
@@ -13,20 +13,19 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-/// État partagé de l'API.
+/// Shared application state.
 pub struct AppState {
     pub memory: MemoryStore,
 }
 
-/// Status de santé de l'API.
+/// Health check response.
 #[derive(Serialize)]
 pub struct HealthStatus {
     pub status: String,
     pub version: String,
-    pub crates: Vec<String>,
 }
 
-/// Requête d'insertion mémoire.
+/// Fragment insertion request.
 #[derive(Deserialize)]
 pub struct InsertFragmentRequest {
     pub id: String,
@@ -34,27 +33,20 @@ pub struct InsertFragmentRequest {
     pub content: String,
 }
 
-/// Requête de recherche.
+/// Search query parameters.
 #[derive(Deserialize)]
 pub struct SearchQuery {
     pub q: String,
 }
 
-/// Réponse standard.
+/// Standard API response envelope.
 #[derive(Serialize)]
 pub struct ApiResponse<T: Serialize> {
     pub ok: bool,
     pub data: T,
 }
 
-/// Info du routeur.
-#[derive(Serialize)]
-pub struct RouterInfo {
-    pub models: Vec<ModelInfo>,
-    pub thermal_limit: u32,
-    pub gpu_temp: u32,
-}
-
+/// Model info for API response.
 #[derive(Serialize)]
 pub struct ModelInfo {
     pub name: String,
@@ -63,17 +55,22 @@ pub struct ModelInfo {
     pub max_tokens: usize,
 }
 
-/// Crée le routeur Axum principal.
-pub fn create_router() -> Router {
-    let router = Router::new()
-        .route("/health", get(health))
-        .route("/api/v1/router/info", get(router_info))
-        .route("/api/v1/router/models", get(router_models));
-
-    router
+/// Router info response.
+#[derive(Serialize)]
+pub struct RouterInfo {
+    pub models: Vec<ModelInfo>,
+    pub total_memory_mb: u32,
 }
 
-/// Crée le routeur avec state mémoire (pour tests ou production).
+/// Creates the base router (stateless endpoints).
+pub fn create_router() -> Router {
+    Router::new()
+        .route("/health", get(health))
+        .route("/api/v1/router/info", get(router_info))
+        .route("/api/v1/router/models", get(router_models))
+}
+
+/// Creates the full router with memory state.
 pub fn create_router_with_memory(state: Arc<Mutex<AppState>>) -> Router {
     Router::new()
         .route("/health", get(health))
@@ -83,7 +80,10 @@ pub fn create_router_with_memory(state: Arc<Mutex<AppState>>) -> Router {
         .route("/api/v1/memory/fragments/:id", get(get_fragment))
         .route("/api/v1/memory/fragments/:id", delete(delete_fragment))
         .route("/api/v1/memory/sessions", get(list_sessions))
-        .route("/api/v1/memory/sessions/:session_id/fragments", get(get_session_fragments))
+        .route(
+            "/api/v1/memory/sessions/:session_id/fragments",
+            get(get_session_fragments),
+        )
         .route("/api/v1/memory/search", get(search_fragments))
         .route("/api/v1/memory/count", get(count_fragments))
         .with_state(state)
@@ -93,22 +93,11 @@ async fn health() -> Json<HealthStatus> {
     Json(HealthStatus {
         status: "ok".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
-        crates: vec![
-            "toon-core".to_string(),
-            "memory-engine".to_string(),
-            "llm-router".to_string(),
-            "prompt-engine".to_string(),
-            "refine-loop".to_string(),
-            "agent-runtime".to_string(),
-            "api-server".to_string(),
-        ],
     })
 }
 
 async fn router_info() -> Json<RouterInfo> {
-    let reg = llm_router::ModelRegistry::apophy_default();
-    let gpu_temp = llm_router::thermal::read_gpu_temp();
-
+    let reg = llm_router::ModelRegistry::with_defaults();
     let models = reg
         .all()
         .iter()
@@ -122,13 +111,12 @@ async fn router_info() -> Json<RouterInfo> {
 
     Json(RouterInfo {
         models,
-        thermal_limit: reg.thermal_limit(),
-        gpu_temp,
+        total_memory_mb: reg.total_memory_mb(),
     })
 }
 
 async fn router_models() -> Json<ApiResponse<Vec<ModelInfo>>> {
-    let reg = llm_router::ModelRegistry::apophy_default();
+    let reg = llm_router::ModelRegistry::with_defaults();
     let models = reg
         .all()
         .iter()

@@ -1,6 +1,25 @@
+# Rust
 /target
+
+# Database
 *.db
 *.db-wal
 *.db-shm
-.env
+/data/
+
+# Models
 *.gguf
+/models/
+
+# Environment
+.env
+
+# Bun
+dashboard/node_modules/
+dashboard/dist/
+dashboard/bun.lockb
+
+# UV / Python
+finetune/.venv/
+finetune/__pycache__/
+*.pyc

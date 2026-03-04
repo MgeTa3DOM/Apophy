@@ -1,39 +1,25 @@
-# Apophy — Security Model
+# Apophy — Security
 
-## Threat Model
+## Design Principles
 
-### Attack Surface
-
-| Vector | Mitigation |
-|--------|-----------|
-| Network exposure | Zero network calls without `--allow-network` flag |
-| SQL injection | Parameterized queries only (`rusqlite::params!`) |
-| Memory corruption | Rust ownership model — no `unsafe` blocks |
-| Supply chain | Minimal dependencies, `cargo audit` in CI |
-| GPU side-channel | Thermal guard auto-failover, no shared GPU state |
-| Data persistence | SQLite WAL with file permissions, no plaintext secrets |
-
-### Design Principles
-
-1. **Zero cloud** — All inference runs locally on GGUF models
-2. **Zero network** — No outbound connections without explicit flag
-3. **Zero `unwrap()`** — All code uses `Result<T, AppError>` (enforced by grep audit)
-4. **Minimal surface** — Each crate has a single responsibility
-5. **Type safety** — Rust's ownership model prevents memory bugs
+1. **Local-first** — all inference and data stays on your machine
+2. **No `unwrap()`** — all production code uses `Result<T, Error>`
+3. **Parameterized queries** — SQL injection prevented via `rusqlite::params!`
+4. **Memory safe** — Rust ownership model, no `unsafe` blocks
+5. **Minimal dependencies** — audited via `cargo audit` in CI
+6. **No secrets in code** — environment variables for all configuration
 
 ## Dependency Audit
 
-Run manually:
+Automated in CI via `rustsec/audit-check`. Run manually:
+
 ```bash
 cargo audit
 ```
 
-Automated in CI via `rustsec/audit-check@v2`.
+## Code Quality Enforcement
 
-## Code Quality Rules
-
-- No `unwrap()` in production code
-- No `println!` in production (use `tracing::info/warn/error`)
-- No Python in critical path
-- All public functions documented
-- Tests in every file (`#[cfg(test)]` module)
+- `cargo clippy -- -D warnings` in CI
+- `cargo fmt --check` in CI
+- Zero `unwrap()` policy (grep audit)
+- Tests in every source file

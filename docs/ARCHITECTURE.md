@@ -2,18 +2,16 @@
 
 ## System Design
 
-Apophy is a sovereign local AI continuity engine. Zero cloud. Zero fragmentation. Zero silent degradation.
-
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                        api-server (Axum)                        │
-│  REST /api/v1/*  ·  WebSocket /ws  ·  Health /health            │
+│  REST /api/v1/*  ·  Health /health                              │
 ├─────────────────────────────────────────────────────────────────┤
 │                      agent-runtime (BarqFlow)                   │
 │  HybridWorkflow  ·  DAG Executor  ·  Topological Sort           │
 ├──────────────┬──────────────────────┬───────────────────────────┤
 │ prompt-engine│    refine-loop       │     llm-router            │
-│ AZR self-play│ Autorecursive refine │ Model registry + thermal  │
+│ AZR self-play│ Autorecursive refine │ Pluggable model routing   │
 ├──────────────┴──────────────────────┴───────────────────────────┤
 │                      memory-engine (SQLite WAL)                 │
 │  Fragments  ·  Sessions  ·  Search  ·  TOON auto-compress       │
@@ -21,19 +19,33 @@ Apophy is a sovereign local AI continuity engine. Zero cloud. Zero fragmentation
 │                        toon-core (TOON v3)                      │
 │  Encode/Decode  ·  zstd-12  ·  Smart threshold  ·  Batch ops    │
 └─────────────────────────────────────────────────────────────────┘
+         ↕                                    ↕
+   dashboard (Bun + Hono)            finetune (UV + Unsloth)
+   Real-time monitoring UI           QLoRA from conversation memory
 ```
 
-## 7 Crates — Single Responsibility
+## Stack
 
-| Crate | Responsibility | Key Type |
-|-------|---------------|----------|
-| `toon-core` | Token-efficient serialization | `encode()`, `smart_encode()` |
-| `memory-engine` | Persistent memory (SQLite WAL) | `MemoryStore`, `MemoryFragment` |
-| `llm-router` | Model selection + thermal guard | `ModelRegistry`, `thermal::read_gpu_temp()` |
-| `prompt-engine` | AZR self-play prompt refinement | `ScoredPrompt`, `evaluate_prompt()` |
-| `refine-loop` | Autorecursive convergence | `refine()`, `RefineConfig` |
-| `agent-runtime` | BarqFlow DAG workflow engine | `HybridWorkflow`, `HybridTask` |
-| `api-server` | HTTP/WS API layer | `create_router()` |
+| Layer | Technology |
+|-------|-----------|
+| Core | Rust 2021 / Tokio 1.40 / Axum 0.8 |
+| Dashboard | Bun + Hono + TypeScript |
+| Fine-Tuning | UV + Unsloth + QLoRA |
+| Database | SQLite WAL (rusqlite 0.32) |
+| Serialization | TOON v3 + zstd-12 |
+| Workflow | petgraph DAG |
+
+## 7 Crates
+
+| Crate | Responsibility |
+|-------|---------------|
+| `toon-core` | Token-efficient serialization |
+| `memory-engine` | Persistent memory (SQLite WAL) |
+| `llm-router` | Pluggable model selection |
+| `prompt-engine` | AZR self-play refinement |
+| `refine-loop` | Autorecursive convergence |
+| `agent-runtime` | BarqFlow DAG workflows |
+| `api-server` | HTTP API layer |
 
 ## Data Flow
 
@@ -41,37 +53,22 @@ Apophy is a sovereign local AI continuity engine. Zero cloud. Zero fragmentation
 toon-core → memory-engine → llm-router → prompt-engine → refine-loop → agent-runtime → api-server
 ```
 
-Each arrow = direct dependency. Direction = data flow.
+## Pluggable Backend
 
-## Models (Rolling Release Local GGUF)
+```rust
+#[async_trait]
+pub trait InferenceBackend: Send + Sync {
+    async fn generate(&self, model: &str, prompt: &str, max_tokens: usize) -> RouterResult<String>;
+    async fn is_healthy(&self, model: &str) -> bool;
+}
+```
 
-| Model | Role | Resource | Usage |
-|-------|------|----------|-------|
-| FunctionGemma:270m | Orchestration (router) | CPU | 100% input |
-| GLM-4.7-Flash | Vision / Code | GPU 4GB | 20% max |
-| Gemma3:270m | Embedding / Memory | CPU | always |
+Implement for llama.cpp, vLLM, Ollama, or any runtime.
 
-## Thermal Guard
+## Self-Improvement Loop
 
-CLAUDE.md rule: GPU < 80°C or automatic CPU failover.
+```
+Conversations → memory-engine → finetune/export → QLoRA training → GGUF model → llm-router
+```
 
-The `llm-router::thermal` module reads sysfs temperature sensors. When the GPU exceeds the thermal limit, the `ModelRegistry::route()` function automatically excludes GPU models and falls back to CPU-only inference.
-
-## TOON v3 Protocol
-
-Token-Oriented Object Notation — compact serialization for LLMs.
-
-- JSON compact + zstd level 12 compression
-- ~60% token reduction vs raw JSON
-- Automatic threshold: if content > 100 tokens, TOON is mandatory
-- `smart_encode()` handles the decision transparently
-
-## BarqFlow Workflow Engine
-
-Hybrid DAG + graph-flow pattern:
-
-1. Register tasks as DAG nodes
-2. Declare edges (dependencies)
-3. Topological sort for execution order
-4. Sequential execution with shared `TaskContext`
-5. Metrics collection at each node
+The model running in 6 months is yours — trained on your own conversations.

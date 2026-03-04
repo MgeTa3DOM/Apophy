@@ -2,78 +2,55 @@
 
 ## Prerequisites
 
-- Rust 1.81+ (stable)
-- Proxmox VE 8.x (for production deployment)
-- Docker 24+ (optional, for containerized deployment)
+- Rust 1.81+ (`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`)
+- UV (`curl -LsSf https://astral.sh/uv/install.sh | sh`) — for fine-tuning
+- Bun (`curl -fsSL https://bun.sh/install | bash`) — for dashboard
 
-## Local Development
+## Quick Deploy
 
 ```bash
-# Build
-cargo build --workspace
-
-# Test
-cargo test --workspace
-
-# Run API server
-cargo run --bin api-server
+./scripts/deploy.sh --release
 ```
 
-## Docker Deployment
+This builds Rust, sets up UV + Bun, and prepares data directories.
+
+## Running
 
 ```bash
-# Build image
-docker build -f docker/Dockerfile -t apophy-lab .
+# API Server (Rust)
+RUST_LOG=info cargo run --bin api-server
 
-# Run
-docker compose -f docker/docker-compose.yml up -d
+# Dashboard (Bun)
+cd dashboard && bun dev
 
-# Check health
-curl http://localhost:8080/health
-```
-
-## Proxmox Deployment
-
-```bash
-# 1-click deploy (creates LXC container, copies binaries, installs systemd service)
-./scripts/deploy.sh
-
-# With GPU passthrough (RTX 5070)
-./scripts/deploy.sh 101 --gpu
+# Fine-tune (UV)
+cd finetune && uv run python train.py --help
 
 # Monitor
 ./scripts/monitor.sh
 ```
 
-## API Endpoints
+## API Reference
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/health` | Health check + version |
-| GET | `/api/v1/router/info` | Model registry + GPU temp |
-| GET | `/api/v1/router/models` | List all models |
-| POST | `/api/v1/memory/fragments` | Insert memory fragment |
-| GET | `/api/v1/memory/fragments/:id` | Get fragment by ID |
-| DELETE | `/api/v1/memory/fragments/:id` | Delete fragment |
-| GET | `/api/v1/memory/sessions` | List all sessions |
-| GET | `/api/v1/memory/sessions/:id/fragments` | Get session fragments |
-| GET | `/api/v1/memory/search?q=query` | Search fragments |
-| GET | `/api/v1/memory/count` | Count total fragments |
+| GET | `/health` | Health check |
+| GET | `/api/v1/router/info` | Model registry info |
+| GET | `/api/v1/router/models` | List models |
+| POST | `/api/v1/memory/fragments` | Insert fragment |
+| GET | `/api/v1/memory/fragments/:id` | Get by ID |
+| DELETE | `/api/v1/memory/fragments/:id` | Delete |
+| GET | `/api/v1/memory/sessions` | List sessions |
+| GET | `/api/v1/memory/sessions/:id/fragments` | Session fragments |
+| GET | `/api/v1/memory/search?q=query` | Search |
+| GET | `/api/v1/memory/count` | Count |
 
 ## Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `RUST_LOG` | `info` | Log level (trace, debug, info, warn, error) |
-| `APOPHY_DB_PATH` | `memory.db` | SQLite database path |
+| `RUST_LOG` | `info` | Log level |
+| `APOPHY_DB_PATH` | `memory.db` | SQLite path |
 | `APOPHY_PORT` | `8080` | API server port |
-
-## Monitoring
-
-```bash
-# Real-time logs
-journalctl -u apophy -f
-
-# System monitor (GPU temp, memory, disk)
-./scripts/monitor.sh
-```
+| `DASHBOARD_PORT` | `3000` | Dashboard port |
+| `APOPHY_API_URL` | `http://localhost:8080` | API URL for dashboard |
